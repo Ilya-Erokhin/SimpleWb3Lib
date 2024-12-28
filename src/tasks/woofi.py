@@ -1,6 +1,7 @@
 import asyncio
 from typing import List
 
+from src.utils.helpers import generate_addresses
 from web3 import Web3
 from hexbytes import HexBytes
 from eth_typing import ChecksumAddress
@@ -45,11 +46,12 @@ class WooFi:
         :return: List of hex bytes
         """
         eth_price: float = await self.client.get_token_price(token='ETH')
-        contract: AsyncContract = await self.client.get_contract(
+        contract: AsyncContract = self.client.get_contract(
             contract_address=self.router_address,
             abi=self.router_abi
         )
-        from_addresses: List[ChecksumAddress] = await self.client.generate_addresses(self.client.private_keys)
+        from_addresses: List[ChecksumAddress] = await generate_addresses(
+            private_keys=self.client.private_keys)
 
         min_to_amount = TokenAmount(
             amount=eth_price * float(amount.Ether) * (1 - slippage / 100),
@@ -96,11 +98,11 @@ class WooFi:
         :return: List of transaction hashes
         """
         eth_price: float = await self.client.get_token_price(token='ETH')
-        contract: AsyncContract = await self.client.get_contract(
+        contract: AsyncContract = self.client.get_contract(
             contract_address=self.router_address,
             abi=self.router_abi
         )
-        from_addresses: List[ChecksumAddress] = await self.client.generate_addresses(
+        from_addresses: List[ChecksumAddress] = await generate_addresses(
             private_keys=self.client.private_keys
         )
         balances: List[TokenAmount] = await self.client.balances_of(

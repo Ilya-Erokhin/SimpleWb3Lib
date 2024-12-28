@@ -3,6 +3,8 @@ import inspect
 import itertools
 
 import aiohttp
+from settings import USE_PROXY, INCREASE_GAS
+from src.utils.helpers import retry, generate_addresses, get_proxy
 
 from web3 import AsyncWeb3
 from hexbytes import HexBytes
@@ -34,11 +36,10 @@ class Client:
         self.proxies: itertools.cycle = load_proxies(proxies_file=PROXIES_FILE)
         self.proxy_mapping: dict | None = (
             dict(zip(self.private_keys, self.proxies))
-            if self.proxies
+            if USE_PROXY
             else None
         )
-        if self.proxies:
-            # itertools.cycle for cycling through proxies
+        if USE_PROXY:
             proxy_cycle = itertools.cycle(self.proxies)
             self.proxy_mapping: dict | None = {
                 private_key: next(proxy_cycle) for private_key in self.private_keys
@@ -96,20 +97,9 @@ class Client:
                 logger.warning("⚠️ Attempted to close ClientSession, but it was already None. ⚠️")
         except Exception as e:
             logger.error(f"❌ Error occurred while closing ClientSession: \n{e}")
+            raise
 
-    async def get_proxy(self, private_key: str) -> str | None:
-        """
-        Retrieves the proxy for a given private key.
-
-        :param private_key: The private key of the wallet.
-        :return: Proxy string (login:password@ip:port) or None if proxies are not used.
-        """
-        if self.proxy_mapping:
-            proxy: str | None = self.proxy_mapping.get(private_key)
-            return proxy
-        return None
-
-    async def get_contract(
+    def get_contract(
             self,
             contract_address: str,
             abi: dict | None = None
@@ -137,6 +127,7 @@ class Client:
     ) -> List[Tuple[ChecksumAddress, int]]:
         """
         Generic method for fetching data from a contract.
+
         :param contract: The contract to interact with.
         :param func_name: The name of the contract function (balanceOf or allowance).
         :param private_keys: A list of private keys to derive addresses.
@@ -145,13 +136,15 @@ class Client:
         """
         # Create the session once for all requests
         async with aiohttp.ClientSession() as session:
-
             async def fetch(private_key: str) -> Tuple[ChecksumAddress, int]:
                 address = AsyncWeb3.to_checksum_address(Account.from_key(private_key=private_key).address)
                 func = getattr(contract.functions, func_name)
 
                 # Get the proxy for this wallet
-                proxy: str = await self.get_proxy(private_key)
+                proxy: str | None = await get_proxy(
+                    proxy_mapping=self.proxy_mapping,
+                    private_key=private_key
+                )
 
                 if proxy:
                     # Determine the protocol based on the proxy (you could store this information in a dict or file)
@@ -167,21 +160,6 @@ class Client:
             fetch_tasks = [fetch(private_key) for private_key in private_keys]
             return await asyncio.gather(*fetch_tasks)
 
-    @staticmethod
-    async def generate_addresses(private_keys: List[str]) -> List[ChecksumAddress]:
-        """
-        Asynchronous method to generate addresses from a list of private keys.
-
-        :param private_keys: A list of private keys.
-        :return: A list of addresses in checksum format.
-        """
-
-        async def fetch(private_key: str) -> ChecksumAddress:
-            return AsyncWeb3.to_checksum_address(Account.from_key(private_key).address)
-
-        fetch_tasks = [fetch(private_key) for private_key in private_keys]
-        return await asyncio.gather(*fetch_tasks)
-
     ############################################# READ Functions ######################################################
 
     async def get_decimals(self, contract_token_address: str) -> int:
@@ -189,10 +167,8 @@ class Client:
         Retrieves the number of decimal places for the token.
         :param contract_token_address: The token contract address (BASE - NOT PROXY).
         """
-        decimals: int = await self.async_w3.eth.contract(
-            address=AsyncWeb3.to_checksum_address(value=contract_token_address),
-            abi=Client.default_token_abi
-        ).functions.decimals().call()
+        contract: AsyncContract = self.get_contract(contract_address=contract_token_address)
+        decimals: int = await contract.functions.decimals().call()
         return decimals
 
     async def balances_of(
@@ -209,7 +185,7 @@ class Client:
         :param log: Whether to log balance information.
         :return: A list of TokenAmount objects with balance and decimal values.
         """
-        contract: AsyncContract = await self.get_contract(contract_address=contract_token_address)
+        contract: AsyncContract = self.get_contract(contract_address=contract_token_address)
 
         decimals: int = await self.get_decimals(contract_token_address=contract_token_address)
         balances: List[TokenAmount] = []
@@ -250,7 +226,7 @@ class Client:
         :param spender_address: The address of the spender.
         :return: A list of TokenAmount objects with allowances and decimal values.
         """
-        contract: AsyncContract = await self.get_contract(contract_address=contract_token_address)
+        contract: AsyncContract = self.get_contract(contract_address=contract_token_address)
 
         results: List[Tuple[ChecksumAddress, int]] = await self.fetch_data(
             contract,
@@ -311,7 +287,7 @@ class Client:
             from_wallet_address: ChecksumAddress,
             to: str,
             data: str = None,
-            increase_gas: float = 1.1,
+            increase_gas: float = INCREASE_GAS,
             value: int = None,
             max_priority_fee_per_gas: int = None,
             max_fee_per_gas: int = None,
@@ -397,6 +373,7 @@ class Client:
             'signed_txn': signed_txn
         }
 
+    @retry
     async def send_row_async_transaction(
             self,
             signed_txn: SignedTransaction,
@@ -418,37 +395,31 @@ class Client:
         )
 
         transaction_hashes: List[HexBytes] = []
-        retry_count: int = 0
-        max_retries: int = 5
-
-        while retry_count < max_retries:
-            try:
-                tx_hash: HexBytes = await self.async_w3.eth.send_raw_transaction(
-                    transaction=signed_txn.raw_transaction
-                )
-                logger.success(
-                    f'✅ {base_log}SUCCESSFUL Transaction! \n'
-                    f'With transaction params: \n{tx_params} \n'
-                )
-                transaction_hashes.append(tx_hash)
-                break
-            except Exception as e:
-                logger.error(
-                    f'❌ {base_log}Transaction FAILED: \n'
-                    f'Retry attempt: {retry_count + 1}/{max_retries}\n'
-                    f'Transaction parameters: {tx_params}\n'
-                    f'Signed transaction: {signed_txn.raw_transaction.hex()}\n'
-                    f'An Error: {e}'
-                )
-                retry_count += 1
-                await asyncio.sleep(1)
+        ########################################################## TODO: Нужен ли тут semaphore?
+        try:
+            tx_hash: HexBytes = await self.async_w3.eth.send_raw_transaction(
+                transaction=signed_txn.raw_transaction
+            )
+            logger.success(
+                f'✅ {base_log}SUCCESSFUL Transaction! \n'
+                f'With transaction params: \n{tx_params} \n'
+            )
+            transaction_hashes.append(tx_hash)
+        except Exception as e:
+            logger.error(
+                f'❌ {base_log}Transaction FAILED: \n'
+                f'Transaction parameters: {tx_params}\n'
+                f'Signed transaction: {signed_txn.raw_transaction.hex()}\n'
+                f'An Error: {e}'
+            )
+            raise
 
         return transaction_hashes
 
     async def send_async_txn_with_prepared_data(
             self,
             to: str,
-            increase_gas: float = 1.1,
+            increase_gas: float = INCREASE_GAS,
             from_wallet_address: ChecksumAddress = None,
             data: str = None,
             value: int = None,
@@ -509,7 +480,7 @@ class Client:
         base_log = (
             f'Log from function: "{inspect.currentframe().f_code.co_name}"\n'
         )
-        from_addresses: List[ChecksumAddress] = await self.generate_addresses(
+        from_addresses: List[ChecksumAddress] = await generate_addresses(
             private_keys=self.private_keys
         )
 
@@ -594,7 +565,7 @@ class Client:
         :param amount_to_approve: The amount of tokens to approve. If None, the entire balance is approved.
         :return: True if the approval transaction was successful, False otherwise.
         """
-        contract: AsyncContract = await self.get_contract(contract_address=contract_token_address)
+        contract: AsyncContract = self.get_contract(contract_address=contract_token_address)
         decimals: int = await self.get_decimals(contract_token_address=contract_token_address)
 
         base_log = (
@@ -689,3 +660,30 @@ class Client:
         except Exception as e:
             logger.error(f"❌ {base_log}Unexpected error occurred: {e}")
             return None
+
+    # async def check_claim_status(
+    #         self,
+    #         wallet_address: ChecksumAddress,
+    #         contract_token_address: str,
+    #         abi: dict,
+    # ):
+    #     """
+    #     Check the status of a claim.
+    #
+    #     :param wallet_address: The wallet address.
+    #     :param contract_token_address: The token contract address.
+    #     :param abi: The ABI of the contract.
+    #     :return:
+    #     """
+    #     base_log = (
+    #         f'Log from function: "{inspect.currentframe().f_code.co_name}" \n'
+    #     )
+    #     contract: AsyncContract = self.get_contract(
+    #         contract_address=contract_token_address,
+    #         abi=abi
+    #     )
+    #
+    #     claim_idx = 0  # TODO: Count the number of claims from contract
+    #
+    #     claimable = await contract.functions.isClaimable().call()
+    #     is_claimed = contract.functions.isClaimed(wallet_address, claim_idx).call()

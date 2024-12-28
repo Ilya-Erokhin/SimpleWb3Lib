@@ -172,8 +172,7 @@ class Networks:
 
     Arbitrum = Network(
         name='arbitrum',
-        rpc='https://lb.drpc.org/ogrpc?network=arbitrum&dkey=ApNg3ZZR-Usgs9GdU8P_Yni_i5fTvKsR76R7uivZK8k9',
-        # rpc='https://arbitrum.llamarpc.com',
+        rpc='https://arbitrum.llamarpc.com',
         chain_id=42161,
         eip1559_tx=True,
         coin_symbol='ETH',

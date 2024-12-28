@@ -13,7 +13,7 @@ async def main():
         woofi = WooFi(client=client)
 
         # tx_hashes: List[HexBytes] = await woofi.swap_eth_to_usdc(
-        #     amount=TokenAmount(amount=0.00030, decimals=18),
+        #     amount=TokenAmount(amount=0.0003, decimals=18),
         # )
 
         tx_hashes: List[HexBytes] = await woofi.swap_usdc_to_eth(
